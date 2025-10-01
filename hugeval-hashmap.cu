@@ -284,7 +284,7 @@ uint8_t dev_hugeval_hashmap_insert(
 }
 
 /* 0 on success */
-/*                           data in          len      out        lane_id     */
+/*                           data in         len       out        lane_id     */
 template <void (*HASH32x32)(const uint32_t*, uint32_t, uint32_t*, const uint8_t)>
 __device__ __forceinline__
 uint8_t dev_hugeval_hashmap_insert_warped(
@@ -316,7 +316,7 @@ uint8_t dev_hugeval_hashmap_insert_warped(
 
 /* return the moduled hash key, meaning real index to duplicate element or -1 */
 /* if inserted                                                                */
-/*                       data in            len                               */
+/*                       data in          len                                 */
 template <void (*HASH32)(const uint32_t*, int)>
 __device__ __forceinline__
 int32_t dev_hugeval_hashmap_insert_nonduped(
@@ -347,7 +347,7 @@ int32_t dev_hugeval_hashmap_insert_nonduped(
   return -1;
 }
 
-/*                           data in          len      out        lane_id     */
+/*                           data in         len       out        lane_id     */
 template <void (*HASH32x32)(const uint32_t*, uint32_t, uint32_t*, const uint8_t)>
 __device__ __forceinline__
 uint8_t dev_hugeval_hashmap_insert_nonduped_warped(

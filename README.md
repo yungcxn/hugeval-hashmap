@@ -1,6 +1,6 @@
 # hugeval-hashmap
 
-This hashmaps is built upon the following assumptions:
+This hashmap is built upon the following assumptions:
 1. All values (elements) are huge and of the same size => No pointers to elements needed, consecutive array of elements
 2. Elements do not differ much => Full hashing of elements
 3. Many elements => Big hash
