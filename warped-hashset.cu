@@ -8,7 +8,7 @@
 #define LOAD_MULTIPLIER 4
 #define EMPTYVAL 0xFF
 #define UNUSED 0xFFFFFFFF
-#define USED   0xDEADBEEF
+#define USED   0xFFFFFFFE
 
 #define DEFAULT_C1 0xcc9e2d51
 #define DEFAULT_C2 0x1b873593
@@ -24,22 +24,21 @@ typedef struct {
   uint32_t linelength; /* used/unused element + uint32s in one line */
   uint32_t elements;
   uint32_t* data;
-} hugeval_hashmap_t;
-
+} warped_hashset_t;
 
 static __forceinline__ __device__
-void _memcpy(int32_t* dst, const int32_t* src, uint32_t len) {
+void _memcpy(uint32_t* dst, const uint32_t* src, uint32_t len) {
   for (uint32_t i = 0; i < len; i++) dst[i] = src[i];
 }
 
 
 static __forceinline__ __device__
-void _warp32_memcpy(int32_t* dst, const int32_t* src, uint32_t len, uint32_t lane_id) {
+void _warp32_memcpy(uint32_t* dst, const uint32_t* src, uint32_t len, uint32_t lane_id) {
   for (int i = lane_id; i < len; i+=32) dst[i] = src[i];
 }
 
 static __forceinline__ __device__
-bool _memcmp(const int32_t* a, const int32_t* b, uint32_t len) {
+bool _memcmp(const uint32_t* a, const uint32_t* b, uint32_t len) {
   for (uint32_t i = 0; i < len; i++) {
     if (a[i] != b[i]) {
       return false;
@@ -49,13 +48,11 @@ bool _memcmp(const int32_t* a, const int32_t* b, uint32_t len) {
 }
 
 static __forceinline__ __device__
-bool _warp32_memcmp(const int32_t* a, const int32_t* b, uint32_t len, uint32_t lane_id) {
+bool _warp32_memcmp(const uint32_t* a, const uint32_t* b, uint32_t len,
+                    uint32_t lane_id) {
   bool eq = true;
-  for (int i = lane_id; i < len; i+=32) {
-    if (a[i] != b[i]) eq = false;
-    eq = __all_sync(0xFFFFFFFF, eq);
-    if (!eq) break;
-  }
+  for (int i = lane_id; i < len; i+=32) if (a[i] != b[i]) eq = false;
+  eq = __all_sync(0xFFFFFFFF, eq); /* outside loop */
   return eq;
 }
 
@@ -84,9 +81,8 @@ void _murmur_manip_32(uint32_t* k, uint32_t* h) {
 }
 
 
-
 static __device__ __forceinline__
-uint32_t murmurhash3_32(const uint32_t* val, int len)
+uint32_t murmurhash3_32(const uint32_t* val, uint32_t len)
 {
   uint32_t h1 = 0;
 
@@ -102,7 +98,7 @@ uint32_t murmurhash3_32(const uint32_t* val, int len)
 }
 
 static __device__ __forceinline__
-void murmurhash3_32x32(const uint32_t* val, int len, uint32_t* out, const uint8_t lane_id)
+void murmurhash3_32x32(const uint32_t* val, uint32_t len, uint32_t* out, const uint8_t lane_id)
 {
   uint32_t h_i = 0;
   uint32_t h_i_next = 0;
@@ -146,10 +142,8 @@ uint32_t _xxh32_avalanche(uint32_t h32)
 
 
 static __device__ __forceinline__
-uint32_t xxhash32(const uint32_t* val, int len)
+uint32_t xxhash32(const uint32_t* val, uint32_t len)
 {
-  const uint8_t* p = reinterpret_cast<const uint8_t*>(val);
-  const uint8_t* end = p + len * 4; 
   uint32_t h32 = 0;
 
   if (len >= 4) {
@@ -175,7 +169,7 @@ uint32_t xxhash32(const uint32_t* val, int len)
 
   h32 += len * 4;
 
-  return xxh32_avalanche(h32);
+  return _xxh32_avalanche(h32);
 }
 
 
@@ -204,7 +198,7 @@ void xxhash32x32(const uint32_t* val, uint32_t len, uint32_t* out, const uint8_t
 /******************************************************************************/
 
 template <bool warped_mode_guide = false>
-hugeval_hashmap_t hugeval_hashmap_create(
+warped_hashset_t warped_hashset_create(
   const uint32_t elementlen,
   const uint32_t elements
 ) {
@@ -215,21 +209,21 @@ hugeval_hashmap_t hugeval_hashmap_create(
     assert(elementlen > 0 && elementlen % 32 == 0); 
   }
 
-  hugeval_hashmap_t map = {};
-  map.linelength = elementlen + 1; //for used/unused element
+  warped_hashset_t map = {};
+  map.linelength = elementlen;
   map.elements = elements * LOAD_MULTIPLIER;
   cudaMalloc(&map.data, map.linelength * elements 
                         * LOAD_MULTIPLIER * sizeof(uint32_t));
   if (map.data != 0) {
     cudaMemset(map.data, EMPTYVAL, map.linelength * elements 
-               * LOAD_MULTIPLIER * sizeof(uint32_t));
+                                   * LOAD_MULTIPLIER * sizeof(uint32_t));
   }
   return map;
 }
 
 
 /* 0 on success */
-uint8_t hugeval_hashmap_destroy(hugeval_hashmap_t* map) {
+uint8_t warped_hashset_destroy(warped_hashset_t* map) {
   if (map->data != 0) {
     cudaFree(map->data);
     map->data = 0;
@@ -242,16 +236,12 @@ uint8_t hugeval_hashmap_destroy(hugeval_hashmap_t* map) {
 
 
 __device__ __forceinline__
-uint32_t* dev_hugeval_hashmap_get(
-  hugeval_hashmap_t map,
+uint32_t* dev_warped_hashset_get(
+  warped_hashset_t map,
   const uint32_t hashkey /* moduled */
 ) {
-  if (hashkey >= map.elements) {
-    return 0;
-  }
-
-  uint32_t* element_start = &map.data[hashkey * map.linelength] + 1;
-  return element_start;
+  if (hashkey >= map.elements) return 0;
+  return &map.data[hashkey * map.linelength];
 }
 
 
@@ -259,21 +249,21 @@ uint32_t* dev_hugeval_hashmap_get(
 /*                           data in          len                             */
 template <uint32_t (*HASH32)(const uint32_t*, uint32_t)>
 __device__ __forceinline__
-uint8_t dev_hugeval_hashmap_insert(
-  hugeval_hashmap_t* map,
+uint8_t dev_warped_hashset_insert(
+  warped_hashset_t* map,
   const uint32_t* value
 ) {
-  uint32_t hash = HASH32(value, map->linelength - 1);
+  uint32_t hash = HASH32(value, map->linelength);
   uint32_t idx = hash % map->elements;
-  uint32_t* usedflag = dev_hugeval_hashmap_get(*map, idx) - 1;
-  if (usedflag == -1) return 1;
-  while (atomicCAS(usedflag, UNUSED, USED) == USED) {
+  uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
+  if (elementstart == 0) return 1;
+  while (atomicCAS(elementstart, UNUSED, USED) <= USED) {
     idx = (idx + 1) % map->elements;
-    usedflag = dev_hugeval_hashmap_get(*map, idx) - 1;
+    elementstart = dev_warped_hashset_get(*map, idx);
   }
   /* now insert */
-  if (usedflag != 0) {
-    _memcpy(usedflag + 1, value + 1, (map->linelength + 1) * sizeof(uint32_t));
+  if (elementstart != 0) {
+    _memcpy(elementstart, value, (map->linelength));
     return 0;
   }
   /* unreachable */
@@ -284,97 +274,91 @@ uint8_t dev_hugeval_hashmap_insert(
 /*                           data in         len       out        lane_id     */
 template <void (*HASH32x32)(const uint32_t*, uint32_t, uint32_t*, const uint8_t)>
 __device__ __forceinline__
-uint8_t dev_hugeval_hashmap_insert_warped(
-  hugeval_hashmap_t* map,
+uint8_t dev_warped_hashset_insert_warped(
+  warped_hashset_t* map,
   const uint32_t* value
 ) {
   const uint8_t lane_id = threadIdx.x % 32;
   uint32_t hash;
   for (uint32_t i = 0; i < 32; i++) {
-    uint32_t* val_i = (uint32_t*) __shfl_sync(mask, (uintptr_t) value, i);
+    uint32_t* val_i = (uint32_t*) __shfl_sync(0xFFFFFFFF, (uintptr_t) value, i);
     if (val_i == 0) continue; /* no value */
-    HASH32x32(val_i, map->linelength - 1, &hash, lane_id);
+    HASH32x32(val_i, map->linelength, &hash, lane_id);
 
     uint32_t idx = hash % map->elements;
-    uint32_t* usedflag = dev_hugeval_hashmap_get(*map, idx) - 1;
-    if (usedflag == -1) return 1;
-    while (atomicCAS(usedflag, UNUSED, USED) == USED) {
+    uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
+    if (elementstart == 0) return 1;
+    while (atomicCAS(elementstart, UNUSED, USED) <= USED) {
       idx = (idx + 1) % map->elements;
-      usedflag = dev_hugeval_hashmap_get(*map, idx) - 1;
+      elementstart = dev_warped_hashset_get(*map, idx);
     }
     /* now insert */
-    if (usedflag == 0) return 1; /* unreachable */
-    _warp32_memcpy(usedflag + 1, val_i + 1, (map->linelength + 1));
+    if (elementstart == 0) return 1; /* unreachable */
+    _warp32_memcpy(elementstart, val_i, (map->linelength), lane_id);
   }
   
   return 0;
 }
 
+#define NONDUPE_INSERT_SUCCESS 0xFFFFFFFF
+#define NONDUPE_INSERT_ERROR   0xFFFFFFFE
 
 /* return the moduled hash key, meaning real index to duplicate element or -1 */
 /* if inserted                                                                */
 /*                       data in          len                                 */
-template <void (*HASH32)(const uint32_t*, int)>
+template <uint32_t (*HASH32)(const uint32_t*, uint32_t)>
 __device__ __forceinline__
-int32_t dev_hugeval_hashmap_insert_nonduped(
-  hugeval_hashmap_t* map,
+uint32_t dev_warped_hashset_insert_nonduped(
+  warped_hashset_t* map,
   const uint32_t* value
 ) {
   
-  uint32_t hash = HASH32(value, map->linelength - 1);
+  uint32_t hash = HASH32(value, map->linelength);
   uint32_t idx = hash % map->elements;
-  uint32_t* usedflag = dev_hugeval_hashmap_get(*map, idx) - 1;
-  if (usedflag == -1) return -1;
-  while (atomicCAS(usedflag, UNUSED, USED) == USED) {
+  uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
+  if (elementstart == 0) return NONDUPE_INSERT_ERROR;
+  while (atomicCAS(elementstart, UNUSED, USED) <= USED) {
     /* check if equal */
-    if (_memcmp(usedflag + 1, value + 1, map->linelength - 1)) {
-      /* found duplicate */
-      return idx;
-    }
+    while (atomicAdd(elementstart, 0) == USED); /* wait until other thread writes */
+    if (_memcmp(elementstart, value, map->linelength)) return idx;
     idx = (idx + 1) % map->elements;
-    usedflag = dev_hugeval_hashmap_get(*map, idx) - 1;
-    if (usedflag == -1) return -1;
+    elementstart = dev_warped_hashset_get(*map, idx);
+    if (elementstart == 0) return NONDUPE_INSERT_ERROR;
   }
-  /* now insert */
-  if (usedflag != 0) {
-    _memcpy(usedflag + 1, value + 1, (map->linelength - 1) * sizeof(uint32_t));
-    return -1; /* inserted */
-  }
-  /* unreachable */
-  return -1;
+  _memcpy(elementstart, value, map->linelength);
+  return NONDUPE_INSERT_SUCCESS;
 }
 
-/*                           data in         len       out        lane_id     */
+/* TODO!!!!!!!!!!!!!! false */
+/*                          data in          len       out        lane_id     */
 template <void (*HASH32x32)(const uint32_t*, uint32_t, uint32_t*, const uint8_t)>
 __device__ __forceinline__
-uint8_t dev_hugeval_hashmap_insert_nonduped_warped(
-  hugeval_hashmap_t* map,
+int32_t dev_warped_hashset_insert_nonduped_warped(
+  warped_hashset_t* map,
   const uint32_t* value
 ) {
   const uint8_t lane_id = threadIdx.x % 32;
   uint32_t hash;
   for (uint32_t i = 0; i < 32; i++) {
-    uint32_t* val_i = (uint32_t*) __shfl_sync(mask, (uintptr_t) value, i);
+    uint32_t* val_i = (uint32_t*) __shfl_sync(0xFFFFFFFF, (uintptr_t) value, i);
     if (val_i == 0) continue;
-    HASH32x32(val_i, map->linelength - 1, &hash, lane_id);
+    HASH32x32(val_i, map->linelength, &hash, lane_id);
 
     uint32_t idx = hash % map->elements;
-    uint32_t* usedflag = dev_hugeval_hashmap_get(*map, idx) - 1;
-    if (usedflag == -1) return 1;
-    while (atomicCAS(usedflag, UNUSED, USED) == USED) {
+    uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
+    if (elementstart == 0) return NONDUPE_INSERT_ERROR;
+    while (atomicCAS(elementstart, UNUSED, USED) == USED) {
       /* check if equal */
-      if (_warp32_memcmp(usedflag + 1, val_i + 1, map->linelength - 1, lane_id)) {
+      if (_warp32_memcmp(elementstart, val_i, map->linelength, lane_id)) {
         /* found duplicate */
         return idx;
       }
       idx = (idx + 1) % map->elements;
-      usedflag = dev_hugeval_hashmap_get(*map, idx) - 1;
-      if (usedflag == -1) return 1;
+      elementstart = dev_warped_hashset_get(*map, idx);
+      if (elementstart == 0) return NONDUPE_INSERT_SUCCESS;
     }
-    /* now insert */
-    if (usedflag == 0) return 1; /* unreachable */
-    _warp32_memcpy(usedflag + 1, val_i + 1, (map->linelength - 1), lane_id);
+    _warp32_memcpy(elementstart, val_i, map->linelength, lane_id);
   }
   
-  return 0; /* inserted */
+  return NONDUPE_INSERT_ERROR;
 }

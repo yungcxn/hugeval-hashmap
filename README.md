@@ -1,10 +1,11 @@
-# hugeval-hashmap
+# warped-hashset
 
-This hashmap is built upon the following assumptions:
+This hashset is built upon the following assumptions:
 1. All values (elements) are huge and of the same size => No pointers to elements needed, consecutive array of elements
 2. Elements do not differ much => Full hashing of elements
 3. Many elements => Big hash
 4. All CUDA-Threads may insert, so one warp inserts nothing or 1-32 elements together
+5. element is multiple of 32 uint32s (or other equally sized data types)
 
 ## Underlying work
 
@@ -16,7 +17,7 @@ So make sure that you enter with an active mask of `0xFFFFFFFF`.
 
 ## Usage
 
-copy `hugeval-hashmap.cu` and into your project.
+copy `warped-hashset.cu` and into your project.
 Linkage through headers his highly discouraged due to impractible use of the provided templating.
 If you nevertheless try to link against some custom header, use `nvcc -rdc=true ...` since `__device__` functions get relocatable by linkage through that.
 
