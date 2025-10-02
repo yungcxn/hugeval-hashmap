@@ -7,6 +7,8 @@ This hashset is built upon the following assumptions:
 4. All CUDA-Threads may insert, so one warp inserts nothing or 1-32 elements together
 5. element is multiple of 32 uint32s (or other equally sized data types)
 
+I utilize this for high performance state space exploration of petri nets for my master thesis.
+
 ## Underlying work
 
 I looked into `murmurhash3` and implementations of `xxhash*` both being a high-performer in mass-hashing long arrays.
