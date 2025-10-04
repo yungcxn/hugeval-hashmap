@@ -234,7 +234,7 @@ uint8_t warped_hashset_destroy(warped_hashset_t* map) {
   return 1;
 }
 
-
+/* 0 if out of bounds */
 __device__ __forceinline__
 uint32_t* dev_warped_hashset_get(
   warped_hashset_t map,
@@ -329,36 +329,48 @@ uint32_t dev_warped_hashset_insert_nonduped(
   return NONDUPE_INSERT_SUCCESS;
 }
 
-/* TODO!!!!!!!!!!!!!! false */
 /*                          data in          len       out        lane_id     */
 template <void (*HASH32x32)(const uint32_t*, uint32_t, uint32_t*, const uint8_t)>
 __device__ __forceinline__
-int32_t dev_warped_hashset_insert_nonduped_warped(
+uint32_t dev_warped_hashset_insert_nonduped_warped(
   warped_hashset_t* map,
   const uint32_t* value
 ) {
   const uint8_t lane_id = threadIdx.x % 32;
-  uint32_t hash;
-  for (uint32_t i = 0; i < 32; i++) {
-    uint32_t* val_i = (uint32_t*) __shfl_sync(0xFFFFFFFF, (uintptr_t) value, i);
+  for (int i = 0; i < 32; i++) {
+    const uint32_t* val_i = (const uint32_t*) __shfl_sync(0xFFFFFFFF,
+                                                          (uintptr_t) value,
+                                                          i);
     if (val_i == 0) continue;
+    uint32_t hash;
     HASH32x32(val_i, map->linelength, &hash, lane_id);
-
     uint32_t idx = hash % map->elements;
-    uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
-    if (elementstart == 0) return NONDUPE_INSERT_ERROR;
-    while (atomicCAS(elementstart, UNUSED, USED) == USED) {
-      /* check if equal */
-      if (_warp32_memcmp(elementstart, val_i, map->linelength, lane_id)) {
-        /* found duplicate */
-        return idx;
+    for (uint32_t probe = 0; probe < map->elements; probe++, idx = (idx + 1) % map->elements) {
+      uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
+      if (elementstart == 0) return NONDUPE_INSERT_ERROR;
+      uint32_t claim;
+      if (lane_id == 0) claim = atomicCAS(elementstart, UNUSED, USED);
+      claim = __shfl_sync(0xFFFFFFFF, claim, 0);
+
+      if (claim == UNUSED) {
+        /* slot claimed, all lanes cooperatively write */
+        _warp32_memcpy(elementstart, val_i, map->linelength, lane_id);
+        return NONDUPE_INSERT_SUCCESS; /* TODO? return offset (probe) */
       }
-      idx = (idx + 1) % map->elements;
-      elementstart = dev_warped_hashset_get(*map, idx);
-      if (elementstart == 0) return NONDUPE_INSERT_SUCCESS;
+
+      if (claim == USED) {
+        /* wait until other writer finishes */
+        while (atomicAdd(elementstart, 0) == USED) { }
+        /* fall through to duplicate check */
+      }
+
+      if (_warp32_memcmp(elementstart, val_i, map->linelength, lane_id)) {
+        return idx; /* duplicate at idx (realhash + offset/probe) */
+      }
     }
-    _warp32_memcpy(elementstart, val_i, map->linelength, lane_id);
+
+    return NONDUPE_INSERT_ERROR; // table full
   }
-  
-  return NONDUPE_INSERT_ERROR;
+
+  return NONDUPE_INSERT_SUCCESS; // nothing to insert
 }
