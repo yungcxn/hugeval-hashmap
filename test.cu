@@ -26,18 +26,28 @@ __global__ void kern_xxhash(warped_hashset_t map, const uint32_t* vals, uint32_t
 
 __global__ void kern_murmur_warped(warped_hashset_t map, const uint32_t* vals, uint32_t n, int32_t* out) {
   uint32_t warp_id = (threadIdx.x + blockIdx.x * blockDim.x) / 32;
+  uint32_t lane_id = threadIdx.x % 32;
   if (warp_id >= n/32) return;
-  const uint32_t* val = &vals[warp_id * 32 * ELEMLEN];
-  uint32_t result = dev_warped_hashset_insert_nonduped_warped<murmurhash3_32x32>(&map,val);
-  if ((threadIdx.x % 32) == 0) out[warp_id] = result;
+  
+  // Each thread gets its own element pointer
+  uint32_t element_id = warp_id * 32 + lane_id;
+  const uint32_t* val = (element_id < n) ? &vals[element_id * ELEMLEN] : nullptr;
+  
+  uint32_t result = dev_warped_hashset_insert_nonduped_warped<murmurhash3_32x32>(&map, val);
+  if (lane_id == 0) out[warp_id] = result;
 }
 
 __global__ void kern_xxhash_warped(warped_hashset_t map, const uint32_t* vals, uint32_t n, int32_t* out) {
   uint32_t warp_id = (threadIdx.x + blockIdx.x * blockDim.x) / 32;
+  uint32_t lane_id = threadIdx.x % 32;
   if (warp_id >= n/32) return;
-  const uint32_t* val = &vals[warp_id * 32 * ELEMLEN];
-  uint32_t result = dev_warped_hashset_insert_nonduped_warped<xxhash32x32>(&map,val);
-  if ((threadIdx.x % 32) == 0) out[warp_id] = result;
+  
+  // Each thread gets its own element pointer
+  uint32_t element_id = warp_id * 32 + lane_id;
+  const uint32_t* val = (element_id < n) ? &vals[element_id * ELEMLEN] : nullptr;
+  
+  uint32_t result = dev_warped_hashset_insert_nonduped_warped<xxhash32x32>(&map, val);
+  if (lane_id == 0) out[warp_id] = result;
 }
 
 template <bool per_insert_print=false>

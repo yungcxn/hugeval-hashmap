@@ -1,0 +1,37 @@
+./test
+murmur Results:
+Summary for murmur:
+ total inserts attempted: 32768
+ successful inserts: 32767
+ duplicates: 1
+ errors: 0
+ total time: 1.389 ms
+ throughput: 23.599 Mops/s
+---------------------------------------------------
+xxhash Results:
+Summary for xxhash:
+ total inserts attempted: 32768
+ successful inserts: 32767
+ duplicates: 1
+ errors: 0
+ total time: 1.507 ms
+ throughput: 21.748 Mops/s
+---------------------------------------------------
+murmur warped Results:
+Summary for murmur warped:
+ total inserts attempted: 32768
+ successful inserts: 32768
+ duplicates: 0
+ errors: 0
+ total time: 0.763 ms
+ throughput: 42.953 Mops/s
+---------------------------------------------------
+xxhash warped Results:
+Summary for xxhash warped:
+ total inserts attempted: 32768
+ successful inserts: 32768
+ duplicates: 0
+ errors: 0
+ total time: 0.764 ms
+ throughput: 42.895 Mops/s
+---------------------------------------------------
