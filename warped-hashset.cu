@@ -249,87 +249,57 @@ uint32_t* dev_warped_hashset_get(
 /*                           data in          len                             */
 template <uint32_t (*HASH32)(const uint32_t*, uint32_t)>
 __device__ __forceinline__
-uint8_t dev_warped_hashset_insert(
-  warped_hashset_t* map,
-  const uint32_t* value
-) {
-  uint32_t hash = HASH32(value, map->linelength);
-  uint32_t idx = hash % map->elements;
-  uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
-  if (elementstart == 0) return 1;
-  while (atomicCAS(elementstart, UNUSED, USED) <= USED) {
-    idx = (idx + 1) % map->elements;
-    elementstart = dev_warped_hashset_get(*map, idx);
-  }
-  /* now insert */
-  if (elementstart != 0) {
-    _memcpy(elementstart, value, (map->linelength));
-    return 0;
-  }
-  /* unreachable */
-  return 1;
-}
-
-/* 0 on success */
-/*                           data in         len       out        lane_id     */
-template <void (*HASH32x32)(const uint32_t*, uint32_t, uint32_t*, const uint8_t)>
-__device__ __forceinline__
-uint8_t dev_warped_hashset_insert_warped(
-  warped_hashset_t* map,
-  const uint32_t* value
-) {
-  const uint8_t lane_id = threadIdx.x % 32;
-  uint32_t hash;
-  for (uint32_t i = 0; i < 32; i++) {
-    uint32_t* val_i = (uint32_t*) __shfl_sync(0xFFFFFFFF, (uintptr_t) value, i);
-    if (val_i == 0) continue; /* no value */
-    HASH32x32(val_i, map->linelength, &hash, lane_id);
-
-    uint32_t idx = hash % map->elements;
-    uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
-    if (elementstart == 0) return 1;
-    while (atomicCAS(elementstart, UNUSED, USED) <= USED) {
-      idx = (idx + 1) % map->elements;
-      elementstart = dev_warped_hashset_get(*map, idx);
-    }
-    /* now insert */
-    if (elementstart == 0) return 1; /* unreachable */
-    _warp32_memcpy(elementstart, val_i, (map->linelength), lane_id);
-  }
-  
-  return 0;
-}
-
-#define NONDUPE_INSERT_SUCCESS 0xFFFFFFFF
-#define NONDUPE_INSERT_ERROR   0xFFFFFFFE
-
-/* return the moduled hash key, meaning real index to duplicate element or -1 */
-/* if inserted                                                                */
-/*                       data in          len                                 */
-template <uint32_t (*HASH32)(const uint32_t*, uint32_t)>
-__device__ __forceinline__
 uint32_t dev_warped_hashset_insert_nonduped(
   warped_hashset_t* map,
   const uint32_t* value
 ) {
-  
   uint32_t hash = HASH32(value, map->linelength);
   uint32_t idx = hash % map->elements;
-  uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
-  if (elementstart == 0) return NONDUPE_INSERT_ERROR;
-  while (atomicCAS(elementstart, UNUSED, USED) <= USED) {
-    /* check if equal */
-    while (atomicAdd(elementstart, 0) == USED); /* wait until other thread writes */
-    if (_memcmp(elementstart, value, map->linelength)) return idx;
-    idx = (idx + 1) % map->elements;
-    elementstart = dev_warped_hashset_get(*map, idx);
+
+  for (uint32_t probe = 0; probe < map->elements; probe++, idx = (idx + 1) % map->elements) {
+    uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
     if (elementstart == 0) return NONDUPE_INSERT_ERROR;
+
+    /* try to claim slot: UNUSED -> USED */
+    uint32_t old = atomicCAS(&elementstart[0], UNUSED, USED);
+
+    if (old == UNUSED) {
+      /* We claimed the slot. Write payload except word 0 first. */
+      uint32_t len = map->linelength;
+      for (uint32_t i = 1; i < len; i++) elementstart[i] = value[i];
+
+      /* ensure stores to payload are visible before publishing first word */
+      __threadfence_block();
+
+      /* publish first word (this also ends the 'USED' marker) */
+      elementstart[0] = value[0];
+
+      return NONDUPE_INSERT_SUCCESS;
+    }
+
+    if (old == USED) {
+      /* Another writer is publishing right now; wait until it's done */
+      while (atomicAdd(&elementstart[0], 0) == USED) { }
+      /* now elementstart should contain a finished value; compare below */
+    }
+
+    /* If old is some occupied value (or we just waited), compare for duplicate */
+    if (_memcmp(elementstart, value, map->linelength)) {
+      return idx; /* duplicate found */
+    }
+
+    /* otherwise continue probing */
   }
-  _memcpy(elementstart, value, map->linelength);
-  return NONDUPE_INSERT_SUCCESS;
+
+  /* table full / couldn't insert */
+  return NONDUPE_INSERT_ERROR;
 }
 
-/*                          data in          len       out        lane_id     */
+
+#define NONDUPE_INSERT_SUCCESS 0xFFFFFFFF
+#define NONDUPE_INSERT_ERROR   0xFFFFFFFE
+
+
 template <void (*HASH32x32)(const uint32_t*, uint32_t, uint32_t*, const uint8_t)>
 __device__ __forceinline__
 uint32_t dev_warped_hashset_insert_nonduped_warped(
@@ -337,40 +307,69 @@ uint32_t dev_warped_hashset_insert_nonduped_warped(
   const uint32_t* value
 ) {
   const uint8_t lane_id = threadIdx.x % 32;
+
   for (int i = 0; i < 32; i++) {
-    const uint32_t* val_i = (const uint32_t*) __shfl_sync(0xFFFFFFFF,
-                                                          (uintptr_t) value,
-                                                          i);
+    const uint32_t* val_i = (const uint32_t*)__shfl_sync(0xFFFFFFFF, (uintptr_t)value, i);
     if (val_i == 0) continue;
+
     uint32_t hash;
     HASH32x32(val_i, map->linelength, &hash, lane_id);
+
     uint32_t idx = hash % map->elements;
+
     for (uint32_t probe = 0; probe < map->elements; probe++, idx = (idx + 1) % map->elements) {
       uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
       if (elementstart == 0) return NONDUPE_INSERT_ERROR;
-      uint32_t claim;
-      if (lane_id == 0) claim = atomicCAS(elementstart, UNUSED, USED);
+
+      /* lane 0 tries to claim slot with CAS, broadcast result to warp */
+      uint32_t claim = 0;
+      if (lane_id == 0) claim = atomicCAS(&elementstart[0], UNUSED, USED);
       claim = __shfl_sync(0xFFFFFFFF, claim, 0);
 
       if (claim == UNUSED) {
-        /* slot claimed, all lanes cooperatively write */
-        _warp32_memcpy(elementstart, val_i, map->linelength, lane_id);
-        return NONDUPE_INSERT_SUCCESS; /* TODO? return offset (probe) */
+        /* slot claimed: write cooperatively, BUT write index 0 last.
+           - lanes write indices 1..len-1 they are responsible for
+           - sync
+           - lane 0 publishes elementstart[0] last
+        */
+        uint32_t len = map->linelength;
+
+        /* each lane writes its subset of words except index 0 */
+        for (uint32_t j = 1 + lane_id; j < len; j += 32) {
+          elementstart[j] = val_i[j];
+        }
+
+        /* ensure local stores visible to other lanes in warp/SM */
+        __syncwarp();
+        __threadfence_block();
+
+        /* publish first word by lane 0 only (or whichever lane is responsible for index 0) */
+        if (lane_id == 0) {
+          elementstart[0] = val_i[0];
+        }
+
+        /* ensure the publish is observed by other lanes before leaving */
+        __syncwarp();
+
+        return NONDUPE_INSERT_SUCCESS;
       }
 
       if (claim == USED) {
-        /* wait until other writer finishes */
-        while (atomicAdd(elementstart, 0) == USED) { }
-        /* fall through to duplicate check */
+        /* another writer is active; spin until it's done */
+        while (atomicAdd(&elementstart[0], 0) == USED) { }
+        /* fall through to cooperative compare */
       }
 
+      /* cooperative compare: if all lanes agree it's equal, duplicate found */
       if (_warp32_memcmp(elementstart, val_i, map->linelength, lane_id)) {
-        return idx; /* duplicate at idx (realhash + offset/probe) */
+        return idx; /* duplicate found */
       }
     }
 
-    return NONDUPE_INSERT_ERROR; // table full
+    /* table full for this value */
+    return NONDUPE_INSERT_ERROR;
   }
 
-  return NONDUPE_INSERT_SUCCESS; // nothing to insert
+  /* nothing to insert in warp */
+  return NONDUPE_INSERT_SUCCESS;
 }

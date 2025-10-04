@@ -5,6 +5,8 @@ all: test
 
 test: test.cu 
 	$(NVCC) $(CFLAGS) -o test test.cu
+	chmod +x ./test
+	./test
 
 run: test
 	./test
