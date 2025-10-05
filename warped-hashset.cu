@@ -28,7 +28,7 @@ typedef struct {
   uint32_t linelength;
   uint32_t elements;
   uint32_t* data;
-} warped_hashset_t;
+} whashset_t;
 
 static __forceinline__ __device__
 void _memcpy(uint32_t* dst, const uint32_t* src, uint32_t len) {
@@ -204,7 +204,7 @@ void xxhash32x32(const uint32_t* val, uint32_t len, uint32_t* out, const uint8_t
 }
 
 template <bool warped_mode_guide = false>
-warped_hashset_t warped_hashset_create(
+whashset_t whashset_create(
   const uint32_t elementlen,
   const uint32_t elements
 ) {
@@ -213,7 +213,7 @@ warped_hashset_t warped_hashset_create(
     assert(elementlen > 0 && elementlen % 32 == 0); 
   }
 
-  warped_hashset_t map = {};
+  whashset_t map = {};
   map.linelength = elementlen;
   map.elements = elements * LOAD_MULTIPLIER;
   cudaMalloc(&map.data, map.linelength * elements 
@@ -226,7 +226,7 @@ warped_hashset_t warped_hashset_create(
 }
 
 /* return: 1=failure */
-uint8_t warped_hashset_destroy(warped_hashset_t* map) {
+uint8_t whashset_destroy(whashset_t* map) {
   if (map->data != 0) {
     cudaFree(map->data);
     map->data = 0;
@@ -240,8 +240,8 @@ uint8_t warped_hashset_destroy(warped_hashset_t* map) {
 /* return: ptr => 0=failure */
 template <bool guide = true>
 __device__ __forceinline__
-uint32_t* dev_warped_hashset_get(
-  warped_hashset_t* map,
+uint32_t* dev_whashset_get(
+  whashset_t* map,
   const uint32_t hashkey
 ) {
   if constexpr (guide) {
@@ -254,16 +254,16 @@ uint32_t* dev_warped_hashset_get(
 /*                           value ptr        len                             */
 template <uint32_t (*HASH32)(const uint32_t*, uint32_t)>
 __device__ __forceinline__
-uint32_t dev_warped_hashset_insert(
-  warped_hashset_t* map,
+uint32_t dev_whashset_insert(
+  whashset_t* map,
   const uint32_t* value
 ) {
   uint32_t idx = HASH32(value, map->linelength) % map->elements;
-  uint32_t* elementstart = dev_warped_hashset_get(map, idx);
+  uint32_t* elementstart = dev_whashset_get(map, idx);
   if (elementstart == 0) return 1;
   while (atomicCAS(elementstart, UNUSED, USED) <= USED) {
     idx = (idx + 1) % map->elements;
-    elementstart = dev_warped_hashset_get(map, idx);
+    elementstart = dev_whashset_get(map, idx);
   }
   if (elementstart != 0) {
     _memcpy(elementstart, value, (map->linelength));
@@ -276,8 +276,8 @@ uint32_t dev_warped_hashset_insert(
 /*                          value ptr        len       out ptr    lane id     */
 template <void (*HASH32x32)(const uint32_t*, uint32_t, uint32_t*, const uint8_t)>
 __device__ __forceinline__
-bool dev_warped_hashset_insert_warped(
-  warped_hashset_t* map,
+bool dev_whashset_insert_warped(
+  whashset_t* map,
   const uint32_t* value
 ) {
   const uint8_t lane_id = threadIdx.x % 32;
@@ -289,10 +289,10 @@ bool dev_warped_hashset_insert_warped(
     hash = hash % map->elements;
     uint32_t* elementstart;
     if (lane_id == 0) {
-      elementstart =  dev_warped_hashset_get(map, hash);
+      elementstart =  dev_whashset_get(map, hash);
       while (atomicCAS(elementstart, UNUSED, USED) <= USED) {
         hash = (hash + 1) % map->elements;
-        elementstart = dev_warped_hashset_get(map, hash);
+        elementstart = dev_whashset_get(map, hash);
         if (elementstart == 0) return 1;
       }
     }
@@ -310,12 +310,12 @@ bool dev_warped_hashset_insert_warped(
 /*                           value ptr        len                             */
 template <uint32_t (*HASH32)(const uint32_t*, uint32_t)>
 __device__ __forceinline__
-uint32_t dev_warped_hashset_insert_nonduped(
-  warped_hashset_t* map,
+uint32_t dev_whashset_insert_nonduped_nonwarped(
+  whashset_t* map,
   const uint32_t* value
 ) {
   uint32_t idx = HASH32(value, map->linelength) % map->elements;
-  uint32_t* elementstart = dev_warped_hashset_get(map, idx);
+  uint32_t* elementstart = dev_whashset_get(map, idx);
   if (elementstart == 0) return NONDUPE_INSERT_ERR;
   
   for (uint32_t probe = 0; probe < map->elements; probe++) {
@@ -333,7 +333,7 @@ uint32_t dev_warped_hashset_insert_nonduped(
       return NONDUPE_INSERT_DUPE;
     
     idx = (idx + 1) % map->elements;
-    elementstart = dev_warped_hashset_get(map, idx);
+    elementstart = dev_whashset_get(map, idx);
     if (elementstart == 0) return NONDUPE_INSERT_ERR;
   }
   
@@ -344,8 +344,8 @@ uint32_t dev_warped_hashset_insert_nonduped(
 /*                          value ptr        len       out ptr    lane id     */
 template <void (*HASH32x32)(const uint32_t*, uint32_t, uint32_t*, const uint8_t)>
 __device__ __forceinline__
-uint32_t dev_warped_hashset_insert_nonduped_warped(
-  warped_hashset_t* map,
+uint32_t dev_whashset_insert_nonduped(
+  whashset_t* map,
   const uint32_t* value
 ) {
   const uint8_t lane_id = threadIdx.x % 32;
@@ -364,7 +364,7 @@ uint32_t dev_warped_hashset_insert_nonduped_warped(
     
     for (uint32_t probe = 0; probe < map->elements; 
          probe++, hash = (hash + 1) % map->elements) {
-      uint32_t* elementstart = dev_warped_hashset_get(map, hash);
+      uint32_t* elementstart = dev_whashset_get(map, hash);
       if (elementstart == 0) return NONDUPE_INSERT_ERR; /* alltogether */
       
       uint32_t claim;

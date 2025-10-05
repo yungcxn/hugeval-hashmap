@@ -10,21 +10,21 @@
 #define ELEMLEN 128
 #define BLOCK 256
 
-__global__ void kern_murmur(warped_hashset_t map, const uint32_t* vals, uint32_t n, uint32_t* out) {
+__global__ void kern_murmur(whashset_t map, const uint32_t* vals, uint32_t n, uint32_t* out) {
   uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
   if (tid >= n) return;
   const uint32_t* val = &vals[tid * ELEMLEN];
-  out[tid] = dev_warped_hashset_insert_nonduped<murmurhash3_32>(&map, val);
+  out[tid] = dev_whashset_insert_nonduped_nonwarped<murmurhash3_32>(&map, val);
 }
 
-__global__ void kern_xxhash(warped_hashset_t map, const uint32_t* vals, uint32_t n, uint32_t* out) {
+__global__ void kern_xxhash(whashset_t map, const uint32_t* vals, uint32_t n, uint32_t* out) {
   uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
   if (tid >= n) return;
   const uint32_t* val = &vals[tid * ELEMLEN];
-  out[tid] = dev_warped_hashset_insert_nonduped<xxhash32>(&map, val);
+  out[tid] = dev_whashset_insert_nonduped_nonwarped<xxhash32>(&map, val);
 }
 
-__global__ void kern_murmur_warped(warped_hashset_t map, const uint32_t* vals, uint32_t n, uint32_t* out) {
+__global__ void kern_murmur_warped(whashset_t map, const uint32_t* vals, uint32_t n, uint32_t* out) {
   uint32_t warp_id = (threadIdx.x + blockIdx.x * blockDim.x) / 32;
   uint32_t lane_id = threadIdx.x % 32;
   if (warp_id >= n/32) return;
@@ -33,13 +33,13 @@ __global__ void kern_murmur_warped(warped_hashset_t map, const uint32_t* vals, u
   uint32_t element_id = warp_id * 32 + lane_id;
   const uint32_t* val = (element_id < n) ? &vals[element_id * ELEMLEN] : nullptr;
   
-  uint32_t result = dev_warped_hashset_insert_nonduped_warped<murmurhash3_32x32>(&map, val);
+  uint32_t result = dev_whashset_insert_nonduped<murmurhash3_32x32>(&map, val);
   
   // Store result for this thread's element
   if (element_id < n) out[element_id] = result;
 }
 
-__global__ void kern_xxhash_warped(warped_hashset_t map, const uint32_t* vals, uint32_t n, uint32_t* out) {
+__global__ void kern_xxhash_warped(whashset_t map, const uint32_t* vals, uint32_t n, uint32_t* out) {
   uint32_t warp_id = (threadIdx.x + blockIdx.x * blockDim.x) / 32;
   uint32_t lane_id = threadIdx.x % 32;
   if (warp_id >= n/32) return;
@@ -48,15 +48,15 @@ __global__ void kern_xxhash_warped(warped_hashset_t map, const uint32_t* vals, u
   uint32_t element_id = warp_id * 32 + lane_id;
   const uint32_t* val = (element_id < n) ? &vals[element_id * ELEMLEN] : nullptr;
   
-  uint32_t result = dev_warped_hashset_insert_nonduped_warped<xxhash32x32>(&map, val);
+  uint32_t result = dev_whashset_insert_nonduped<xxhash32x32>(&map, val);
   
   // Store result for this thread's element
   if (element_id < n) out[element_id] = result;
 }
 
 template <bool per_insert_print=false>
-static void benchmark(const char* name, void (*kernel)(warped_hashset_t,const uint32_t*,uint32_t,uint32_t*), 
-                      warped_hashset_t map, uint32_t* d_vals, uint32_t* d_out, uint32_t* h_out, int n) {
+static void benchmark(const char* name, void (*kernel)(whashset_t,const uint32_t*,uint32_t,uint32_t*), 
+                      whashset_t map, uint32_t* d_vals, uint32_t* d_out, uint32_t* h_out, int n) {
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
@@ -124,22 +124,22 @@ int main() {
   cudaMalloc(&d_out, sizeof(uint32_t)*NVALS);
   cudaMemcpy(d_vals, h_vals, sizeof(uint32_t)*NVALS*ELEMLEN, cudaMemcpyHostToDevice);
 
-  warped_hashset_t map1 = warped_hashset_create<>(ELEMLEN, NVALS*2);
+  whashset_t map1 = whashset_create<>(ELEMLEN, NVALS*2);
   benchmark("murmur", kern_murmur, map1, d_vals, d_out, h_out, NVALS);
-  warped_hashset_destroy(&map1);
+  whashset_destroy(&map1);
 
-  warped_hashset_t map2 = warped_hashset_create<>(ELEMLEN, NVALS*2);
+  whashset_t map2 = whashset_create<>(ELEMLEN, NVALS*2);
   benchmark("xxhash", kern_xxhash, map2, d_vals, d_out, h_out, NVALS);
-  warped_hashset_destroy(&map2);
+  whashset_destroy(&map2);
 
   uint32_t warped_size = ((NVALS*2+31)/32)*32;
-  warped_hashset_t map3 = warped_hashset_create<true>(ELEMLEN, warped_size);
+  whashset_t map3 = whashset_create<true>(ELEMLEN, warped_size);
   benchmark("murmur warped", kern_murmur_warped, map3, d_vals, d_out, h_out, NVALS);
-  warped_hashset_destroy(&map3);
+  whashset_destroy(&map3);
 
-  warped_hashset_t map4 = warped_hashset_create<true>(ELEMLEN, warped_size);
+  whashset_t map4 = whashset_create<true>(ELEMLEN, warped_size);
   benchmark("xxhash warped", kern_xxhash_warped, map4, d_vals, d_out, h_out, NVALS);
-  warped_hashset_destroy(&map4);
+  whashset_destroy(&map4);
 
   cudaFree(d_vals);
   cudaFree(d_out);

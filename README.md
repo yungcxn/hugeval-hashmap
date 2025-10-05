@@ -31,7 +31,7 @@ In Code, you would do something like:
 #define ELEMLEN 128      /* element size in uint32s */
 #define BLOCK 256
 
-__global__ void insert_warped(warped_hashset_t map, const uint32_t* data, 
+__global__ void insert_warped(whashset_t map, const uint32_t* data, 
                                uint32_t n, uint32_t* results) {
   uint32_t warp_id = (threadIdx.x + blockIdx.x * blockDim.x) / 32;
   uint32_t lane_id = threadIdx.x % 32;
@@ -40,7 +40,7 @@ __global__ void insert_warped(warped_hashset_t map, const uint32_t* data,
   uint32_t element_id = warp_id * 32 + lane_id;
   const uint32_t* element = (element_id < n) ? &data[element_id * ELEMLEN] : nullptr;
   
-  uint32_t result = dev_warped_hashset_insert_nonduped_warped<murmurhash3_32x32>(&map, element);
+  uint32_t result = dev_whashset_insert_nonduped<murmurhash3_32x32>(&map, element);
   
   if (element_id < n) results[element_id] = result;
 }
@@ -57,14 +57,14 @@ int main() {
   
   /* create 32-element (warp-aligned) data array */
   uint32_t capacity = ((NVALS * 2 + 31) / 32) * 32;
-  warped_hashset_t map = warped_hashset_create<true>(ELEMLEN, capacity);
+  whashset_t map = whashset_create<true>(ELEMLEN, capacity);
   
   /* insertion */
   insert_warped<<<(NVALS+BLOCK-1)/BLOCK, BLOCK>>>(map, d_data, NVALS, d_results);
   cudaDeviceSynchronize();
   
   /* cleanup */
-  warped_hashset_destroy(&map);
+  whashset_destroy(&map);
   
   cudaFree(d_data);
   cudaFree(d_results);
