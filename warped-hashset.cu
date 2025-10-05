@@ -306,9 +306,9 @@ bool dev_whashset_insert_warped(
 }
 
 
-/* return: amount of collisions or NONDUPE_* codes above */
+/* return: hash or amount of collisions and NONDUPE_* codes above */
 /*                           value ptr        len                             */
-template <uint32_t (*HASH32)(const uint32_t*, uint32_t)>
+template <uint32_t (*HASH32)(const uint32_t*, uint32_t), bool hashret = false>
 __device__ __forceinline__
 uint32_t dev_whashset_insert_nonduped_nonwarped(
   whashset_t* map,
@@ -323,7 +323,8 @@ uint32_t dev_whashset_insert_nonduped_nonwarped(
     
     if (old == UNUSED) {
       _memcpy(elementstart, value, map->linelength);
-      return probe;
+      if constexpr (hashret) return idx;
+      else return probe;
     }
     
     if (old == USED) while (atomicAdd(elementstart, 0) == USED);
@@ -340,9 +341,9 @@ uint32_t dev_whashset_insert_nonduped_nonwarped(
   return NONDUPE_UNINSERTED;
 }
 
-/* return: amount of collisions or NONDUPE_* codes above */
+/* return: hash or amount of collisions and NONDUPE_* codes above */
 /*                          value ptr        len       out ptr    lane id     */
-template <void (*HASH32x32)(const uint32_t*, uint32_t, uint32_t*, const uint8_t)>
+template <void (*HASH32x32)(const uint32_t*, uint32_t, uint32_t*, const uint8_t), bool hashret = false>
 __device__ __forceinline__
 uint32_t dev_whashset_insert_nonduped(
   whashset_t* map,
@@ -374,7 +375,10 @@ uint32_t dev_whashset_insert_nonduped(
 
       if (claim == UNUSED) { /* alltogether */
         _warp32_memcpy(elementstart, val_i, map->linelength, lane_id);
-        if (lane_id == i) retcode = probe;
+        if (lane_id == i) {
+          if constexpr (hashret) retcode = hash;
+          else retcode = probe;
+        }
         break; /* process next */
       } else if (claim == USED) { 
         if (lane_id == 0) while (atomicAdd(elementstart, 0) == USED);
