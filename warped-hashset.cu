@@ -250,6 +250,15 @@ uint32_t* dev_whashset_get(
   return &map->data[hashkey * map->linelength];
 }
 
+__device__ __forceinline__
+bool dev_whashset_remove(
+  whashset_t* map,
+  const uint32_t* hashkey
+) {
+  uint32_t* elementstart = dev_whashset_get(map, *hashkey);
+  elementstart[0] = UNUSED; /* rest is garbage */
+}
+
 /* return: 1=failure */
 /*                           value ptr        len                             */
 template <uint32_t (*HASH32)(const uint32_t*, uint32_t)>
@@ -392,3 +401,6 @@ uint32_t dev_whashset_insert_nonduped(
   } /* left alltogether so just return the saved retcode */
   return retcode;
 }
+
+/* we abstract away the hashes, the user should not be in trouble with them   */
+/* therefore, no direct find or search ops for values to get hashes are needed*/
