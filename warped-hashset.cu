@@ -256,7 +256,9 @@ bool dev_whashset_remove(
   const uint32_t* hashkey
 ) {
   uint32_t* elementstart = dev_whashset_get(map, *hashkey);
+  if (elementstart == 0) return 1;
   elementstart[0] = UNUSED; /* rest is garbage */
+  return 0;
 }
 
 /* return: 1=failure */
