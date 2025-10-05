@@ -5,11 +5,6 @@
 #include <string.h>
 #include <assert.h>
 
-#define LOAD_MULTIPLIER 4
-#define EMPTYVAL 0xFF
-#define UNUSED 0xFFFFFFFF
-#define USED   0xFFFFFFFE
-
 #define DEFAULT_C1 0xcc9e2d51
 #define DEFAULT_C2 0x1b873593
 #define DEFAULT_C3 0xe6546b64
@@ -19,6 +14,15 @@
 #define XXH32_PRIME3 0xC2B2AE3Du
 #define XXH32_PRIME4 0x27D4EB2Fu
 #define XXH32_PRIME5 0x165667B1u
+
+#define LOAD_MULTIPLIER 4
+#define EMPTYVAL 0xFF
+#define UNUSED 0xFFFFFFFF
+#define USED   0xFFFFFFFE
+
+#define NONDUPE_INSERT_ERR 0xFFFFFFFF
+#define NONDUPE_UNINSERTED 0xFFFFFFFE
+#define NONDUPE_INSERT_DUPE 0xFFFFFFFD
 
 typedef struct {
   uint32_t linelength;
@@ -96,22 +100,27 @@ uint32_t murmurhash3_32(const uint32_t* val, uint32_t len)
 static __device__ __forceinline__
 void murmurhash3_32x32(const uint32_t* val, uint32_t len, uint32_t* out, const uint8_t lane_id)
 {
-  uint32_t h_i = 0;
-  uint32_t h_i_next = 0;
+  uint32_t h1 = 0;
 
-  for(int i = 0; i < len; i+=32)
-  {
-    uint32_t k = val[i + lane_id];
-    _murmur_manip_32(&k, &h_i);
-    h_i += h_i_next;
-    h_i_next = __shfl_sync(0xFFFFFFFF, h_i, (lane_id + 1) & 31);
+  for (uint32_t base = 0; base < len; base += 32) {
+    uint32_t idx = base + lane_id;
+    uint32_t k = (idx < len) ? val[idx] : 0;
+
+    if (idx < len) {
+      _murmur_manip_32(&k, &h1);
+    }
+
+    h1 = __shfl_sync(0xFFFFFFFF, h1, 31);
   }
 
-  h_i ^= len;
-  h_i = _fmix32(h_i);
-  uint32_t h_xor = __reduce_xor_sync(0xFFFFFFFF, h_i);
-  *out = _fmix32(h_xor ^ len);
+  if (lane_id == 0) {
+    h1 ^= len;
+    h1 = _fmix32(h1);
+  }
+  
+  *out = __shfl_sync(0xFFFFFFFF, h1, 0);
 }
+
 
 static __device__ __forceinline__
 uint32_t _xxh32_round(uint32_t acc, uint32_t input)
@@ -137,6 +146,7 @@ static __device__ __forceinline__
 uint32_t xxhash32(const uint32_t* val, uint32_t len)
 {
   uint32_t h32 = 0;
+  uint32_t i = 0;
 
   if (len >= 4) {
     uint32_t v1 = XXH32_PRIME1 + XXH32_PRIME2;
@@ -144,23 +154,32 @@ uint32_t xxhash32(const uint32_t* val, uint32_t len)
     uint32_t v3 = 0;
     uint32_t v4 = -XXH32_PRIME1;
 
-    for (int i = 0; i + 4 <= len; i += 4) {
+    for (; i + 4 <= len; i += 4) {
       v1 = _xxh32_round(v1, val[i+0]);
       v2 = _xxh32_round(v2, val[i+1]);
       v3 = _xxh32_round(v3, val[i+2]);
       v4 = _xxh32_round(v4, val[i+3]);
     }
 
-    h32 = (__funnelshift_lc(v1, v1, 1) +
-           __funnelshift_lc(v2, v2, 7) +
-           __funnelshift_lc(v3, v3, 12) +
-           __funnelshift_lc(v4, v4, 18));
+    h32 = __funnelshift_lc(v1, v1, 1)
+        + __funnelshift_lc(v2, v2, 7)
+        + __funnelshift_lc(v3, v3, 12)
+        + __funnelshift_lc(v4, v4, 18);
+
+    h32 = _xxh32_round(h32, v1);
+    h32 = _xxh32_round(h32, v2);
+    h32 = _xxh32_round(h32, v3);
+    h32 = _xxh32_round(h32, v4);
   } else {
     h32 = XXH32_PRIME5;
   }
 
-  h32 += len * 4;
+  for (; i < len; i++) {
+    h32 += val[i] * XXH32_PRIME3;
+    h32 = __funnelshift_lc(h32, h32, 17) * XXH32_PRIME4;
+  }
 
+  h32 += len;
   return _xxh32_avalanche(h32);
 }
 
@@ -177,11 +196,11 @@ void xxhash32x32(const uint32_t* val, uint32_t len, uint32_t* out, const uint8_t
     h_i_next = __shfl_sync(0xFFFFFFFF, h_i, (lane_id + 1) & 31);
   }
 
-  h_i += len * 4;
+  h_i += len;
   h_i = _xxh32_avalanche(h_i);
   uint32_t h_xor = __reduce_xor_sync(0xFFFFFFFF, h_i);
 
-  *out = _xxh32_avalanche(h_xor ^ (len * 4));
+  *out = _xxh32_avalanche(h_xor ^ len);
 }
 
 template <bool warped_mode_guide = false>
@@ -206,6 +225,7 @@ warped_hashset_t warped_hashset_create(
   return map;
 }
 
+/* return: 1=failure */
 uint8_t warped_hashset_destroy(warped_hashset_t* map) {
   if (map->data != 0) {
     cudaFree(map->data);
@@ -217,28 +237,33 @@ uint8_t warped_hashset_destroy(warped_hashset_t* map) {
   return 1;
 }
 
+/* return: ptr => 0=failure */
+template <bool guide = true>
 __device__ __forceinline__
 uint32_t* dev_warped_hashset_get(
-  warped_hashset_t map,
+  warped_hashset_t* map,
   const uint32_t hashkey
 ) {
-  if (hashkey >= map.elements) return 0;
-  return &map.data[hashkey * map.linelength];
+  if constexpr (guide) {
+    if (hashkey >= map->elements) return 0;
+  }
+  return &map->data[hashkey * map->linelength];
 }
 
+/* return: 1=failure */
+/*                           value ptr        len                             */
 template <uint32_t (*HASH32)(const uint32_t*, uint32_t)>
 __device__ __forceinline__
-uint8_t dev_warped_hashset_insert(
+uint32_t dev_warped_hashset_insert(
   warped_hashset_t* map,
   const uint32_t* value
 ) {
-  uint32_t hash = HASH32(value, map->linelength);
-  uint32_t idx = hash % map->elements;
-  uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
+  uint32_t idx = HASH32(value, map->linelength) % map->elements;
+  uint32_t* elementstart = dev_warped_hashset_get(map, idx);
   if (elementstart == 0) return 1;
   while (atomicCAS(elementstart, UNUSED, USED) <= USED) {
     idx = (idx + 1) % map->elements;
-    elementstart = dev_warped_hashset_get(*map, idx);
+    elementstart = dev_warped_hashset_get(map, idx);
   }
   if (elementstart != 0) {
     _memcpy(elementstart, value, (map->linelength));
@@ -247,26 +272,32 @@ uint8_t dev_warped_hashset_insert(
   return 1;
 }
 
+/* return: 1=failure */
+/*                          value ptr        len       out ptr    lane id     */
 template <void (*HASH32x32)(const uint32_t*, uint32_t, uint32_t*, const uint8_t)>
 __device__ __forceinline__
-uint8_t dev_warped_hashset_insert_warped(
+bool dev_warped_hashset_insert_warped(
   warped_hashset_t* map,
   const uint32_t* value
 ) {
   const uint8_t lane_id = threadIdx.x % 32;
-  uint32_t hash;
+  uint32_t hash; /* literally idx, but register reuse so no 2 vars */
   for (uint32_t i = 0; i < 32; i++) {
     uint32_t* val_i = (uint32_t*) __shfl_sync(0xFFFFFFFF, (uintptr_t) value, i);
     if (val_i == 0) continue;
     HASH32x32(val_i, map->linelength, &hash, lane_id);
-
-    uint32_t idx = hash % map->elements;
-    uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
-    if (elementstart == 0) return 1;
-    while (atomicCAS(elementstart, UNUSED, USED) <= USED) {
-      idx = (idx + 1) % map->elements;
-      elementstart = dev_warped_hashset_get(*map, idx);
+    hash = hash % map->elements;
+    uint32_t* elementstart;
+    if (lane_id == 0) {
+      elementstart =  dev_warped_hashset_get(map, hash);
+      while (atomicCAS(elementstart, UNUSED, USED) <= USED) {
+        hash = (hash + 1) % map->elements;
+        elementstart = dev_warped_hashset_get(map, hash);
+        if (elementstart == 0) return 1;
+      }
     }
+    __syncwarp(0xFFFFFFFF);
+    elementstart = (uint32_t*) __shfl_sync(0xFFFFFFFF, (uintptr_t) elementstart, 0);
     if (elementstart == 0) return 1;
     _warp32_memcpy(elementstart, val_i, (map->linelength), lane_id);
   }
@@ -274,49 +305,43 @@ uint8_t dev_warped_hashset_insert_warped(
   return 0;
 }
 
-#define NONDUPE_INSERT_SUCCESS 0xFFFFFFFF
-#define NONDUPE_INSERT_ERROR   0xFFFFFFFE
 
+/* return: amount of collisions or NONDUPE_* codes above */
+/*                           value ptr        len                             */
 template <uint32_t (*HASH32)(const uint32_t*, uint32_t)>
 __device__ __forceinline__
 uint32_t dev_warped_hashset_insert_nonduped(
   warped_hashset_t* map,
   const uint32_t* value
 ) {
-  
-  uint32_t hash = HASH32(value, map->linelength);
-  uint32_t idx = hash % map->elements;
-  uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
-  if (elementstart == 0) return NONDUPE_INSERT_ERROR;
+  uint32_t idx = HASH32(value, map->linelength) % map->elements;
+  uint32_t* elementstart = dev_warped_hashset_get(map, idx);
+  if (elementstart == 0) return NONDUPE_INSERT_ERR;
   
   for (uint32_t probe = 0; probe < map->elements; probe++) {
     uint32_t old = atomicCAS(elementstart, UNUSED, USED);
     
     if (old == UNUSED) {
       _memcpy(elementstart, value, map->linelength);
-      return NONDUPE_INSERT_SUCCESS;
+      return probe;
     }
     
-    if (old == USED) {
-      uint32_t spin_count = 0;
-      while (atomicAdd(elementstart, 0) == USED) {
-        spin_count++;
-        if (spin_count > 1000000) return NONDUPE_INSERT_ERROR;
-      }
-    }
+    if (old == USED) while (atomicAdd(elementstart, 0) == USED);
+                     /* spin-wait (forever) */
 
-    if (_memcmp(elementstart, value, map->linelength)) {
-      return idx;
-    }
+    if (_memcmp(elementstart, value, map->linelength)) 
+      return NONDUPE_INSERT_DUPE;
     
     idx = (idx + 1) % map->elements;
-    elementstart = dev_warped_hashset_get(*map, idx);
-    if (elementstart == 0) return NONDUPE_INSERT_ERROR;
+    elementstart = dev_warped_hashset_get(map, idx);
+    if (elementstart == 0) return NONDUPE_INSERT_ERR;
   }
   
-  return NONDUPE_INSERT_ERROR;
+  return NONDUPE_UNINSERTED;
 }
 
+/* return: amount of collisions or NONDUPE_* codes above */
+/*                          value ptr        len       out ptr    lane id     */
 template <void (*HASH32x32)(const uint32_t*, uint32_t, uint32_t*, const uint8_t)>
 __device__ __forceinline__
 uint32_t dev_warped_hashset_insert_nonduped_warped(
@@ -324,7 +349,8 @@ uint32_t dev_warped_hashset_insert_nonduped_warped(
   const uint32_t* value
 ) {
   const uint8_t lane_id = threadIdx.x % 32;
-  uint32_t my_result = NONDUPE_INSERT_SUCCESS;
+  uint32_t retcode = NONDUPE_UNINSERTED; 
+  /* it could be that some do not have a probe */
   
   for (int i = 0; i < 32; i++) {
     const uint32_t* val_i = (const uint32_t*) __shfl_sync(0xFFFFFFFF,
@@ -332,69 +358,33 @@ uint32_t dev_warped_hashset_insert_nonduped_warped(
                                                           i);
     if (val_i == 0) continue;
     
-    bool is_duplicate_within_batch = false;
-    for (int j = 0; j < i; j++) {
-      const uint32_t* val_j = (const uint32_t*) __shfl_sync(0xFFFFFFFF,
-                                                            (uintptr_t) value,
-                                                            j);
-      if (val_j != 0 && _warp32_memcmp(val_i, val_j, map->linelength, lane_id)) {
-        is_duplicate_within_batch = true;
-        break;
-      }
-    }
-    
-    if (is_duplicate_within_batch) {
-      if (lane_id == 0) {
-        my_result = 0;
-      }
-      continue;
-    }
-    
     uint32_t hash;
     HASH32x32(val_i, map->linelength, &hash, lane_id);
-    uint32_t idx = hash % map->elements;
+    hash = hash % map->elements;
     
-    bool found_slot = false;
-    for (uint32_t probe = 0; probe < map->elements; probe++, idx = (idx + 1) % map->elements) {
-      uint32_t* elementstart = dev_warped_hashset_get(*map, idx);
-      if (elementstart == 0) {
-        if (lane_id == 0) my_result = NONDUPE_INSERT_ERROR;
-        return __shfl_sync(0xFFFFFFFF, my_result, 0);
-      }
+    for (uint32_t probe = 0; probe < map->elements; 
+         probe++, hash = (hash + 1) % map->elements) {
+      uint32_t* elementstart = dev_warped_hashset_get(map, hash);
+      if (elementstart == 0) return NONDUPE_INSERT_ERR; /* alltogether */
       
       uint32_t claim;
       if (lane_id == 0) claim = atomicCAS(elementstart, UNUSED, USED);
+      __syncwarp(0xFFFFFFFF);
       claim = __shfl_sync(0xFFFFFFFF, claim, 0);
 
-      if (claim == UNUSED) {
+      if (claim == UNUSED) { /* alltogether */
         _warp32_memcpy(elementstart, val_i, map->linelength, lane_id);
-        if (lane_id == 0) my_result = NONDUPE_INSERT_SUCCESS;
-        found_slot = true;
-        break;
-      }
-
-      if (claim == USED) {
-        uint32_t spin_count = 0;
-        while (atomicAdd(elementstart, 0) == USED) {
-          spin_count++;
-          if (spin_count > 1000000) {
-            if (lane_id == 0) my_result = NONDUPE_INSERT_ERROR;
-            return __shfl_sync(0xFFFFFFFF, my_result, 0);
-          }
-        }
-      }
-
-      if (_warp32_memcmp(elementstart, val_i, map->linelength, lane_id)) {
-        if (lane_id == 0) my_result = idx;
-        found_slot = true;
-        break;
-      }
+        if (lane_id == i) retcode = probe;
+        break; /* process next */
+      } else if (claim == USED) { 
+        if (lane_id == 0) while (atomicAdd(elementstart, 0) == USED);
+        __syncwarp(0xFFFFFFFF);
+      } else if (_warp32_memcmp(elementstart, val_i, map->linelength, lane_id)) {
+        /* was inserted before */
+        if (lane_id == i) retcode = NONDUPE_INSERT_DUPE;
+        break; /* process next */
+      } /* else continue probing */
     }
-    if (!found_slot) {
-      if (lane_id == 0) my_result = NONDUPE_INSERT_ERROR;
-      return __shfl_sync(0xFFFFFFFF, my_result, 0);
-    }
-  }
-
-  return __shfl_sync(0xFFFFFFFF, my_result, 0);
+  } /* left alltogether so just return the saved retcode */
+  return retcode;
 }

@@ -22,6 +22,56 @@ copy `warped-hashset.cu` into your project.
 Linkage through headers is highly discouraged due to impractible use of the provided templating.
 If you nevertheless try to link against some custom header, use `nvcc -rdc=true ...` since `__device__` functions get relocatable by linkage through that.
 
+In Code, you would do something like:
+
+```c++
+#include "warped-hashset.cu"
+
+#define NVALS 32768      /* number of elements */
+#define ELEMLEN 128      /* element size in uint32s */
+#define BLOCK 256
+
+__global__ void insert_warped(warped_hashset_t map, const uint32_t* data, 
+                               uint32_t n, uint32_t* results) {
+  uint32_t warp_id = (threadIdx.x + blockIdx.x * blockDim.x) / 32;
+  uint32_t lane_id = threadIdx.x % 32;
+  if (warp_id >= n/32) return;
+  
+  uint32_t element_id = warp_id * 32 + lane_id;
+  const uint32_t* element = (element_id < n) ? &data[element_id * ELEMLEN] : nullptr;
+  
+  uint32_t result = dev_warped_hashset_insert_nonduped_warped<murmurhash3_32x32>(&map, element);
+  
+  if (element_id < n) results[element_id] = result;
+}
+
+int main() {
+  uint32_t* d_data;
+  uint32_t* d_results;
+  
+  /* alloc mem on gpu */
+  cudaMalloc(&d_data, sizeof(uint32_t) * NVALS * ELEMLEN);
+  cudaMalloc(&d_results, sizeof(uint32_t) * NVALS);
+  
+  /* fill arrays ..... */
+  
+  /* create 32-element (warp-aligned) data array */
+  uint32_t capacity = ((NVALS * 2 + 31) / 32) * 32;
+  warped_hashset_t map = warped_hashset_create<true>(ELEMLEN, capacity);
+  
+  /* insertion */
+  insert_warped<<<(NVALS+BLOCK-1)/BLOCK, BLOCK>>>(map, d_data, NVALS, d_results);
+  cudaDeviceSynchronize();
+  
+  /* cleanup */
+  warped_hashset_destroy(&map);
+  
+  cudaFree(d_data);
+  cudaFree(d_results);
+  return 0;
+}
+```
+
 ## Requirements
 
 CUDA 13.0 installation which should include `nvcc`.

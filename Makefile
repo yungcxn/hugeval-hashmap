@@ -1,12 +1,11 @@
 NVCC = nvcc
 CFLAGS = -O3 -arch=sm_80
 
-all: test
+all: clean test run
 
 test: test.cu 
 	$(NVCC) $(CFLAGS) -o test test.cu
 	chmod +x ./test
-	./test
 
 run: test
 	./test
